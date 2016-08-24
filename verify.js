@@ -211,7 +211,7 @@ Verify.prototype.startWorkers = function(proxies) {
  */
 Verify.prototype.verifyProxy = function(proxy) {
     var _this = this;
-    startTime = new Date().getTime();
+    var startTime = new Date().getTime();
 
     request({
         method: 'GET',

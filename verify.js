@@ -106,7 +106,7 @@ Verify.prototype.main = function() {
             cluster.fork();
         }
 
-        // receive messages from our worker threads, specifically when they've finished downloading a media file
+        // receive messages from our worker threads
         Object.keys(cluster.workers).forEach(function (id) {
             _this.log("c:blue", "worker ", "c:blue bold", '#' + id, "c:blue", ' is online');
 
@@ -227,7 +227,7 @@ Verify.prototype.verifyProxy = function(proxy) {
 };
 
 /**
- * Dispatch a download to a particular worker assuming there's any proxies left
+ * Dispatch a request to a particular worker assuming there's any proxies left
  * @param id
  */
 Verify.prototype.dispatchRequest = function(id) {

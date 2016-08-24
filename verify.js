@@ -160,7 +160,7 @@ Verify.prototype.main = function() {
             if (msg.cmd) {
                 switch(msg.cmd) {
                     case 'verifyProxy':
-                        _this.verifyProxy(msg.data, new Date().getTime());
+                        _this.verifyProxy(msg.data);
                         break;
                     case 'shutdown':
                         process.disconnect();
@@ -208,11 +208,10 @@ Verify.prototype.startWorkers = function(proxies) {
  * Attempts to establish a connection to the remote host using the proxy.
  * @emit verifyProxy (proxy, error, response, duration)
  * @param proxy
- * @param startTime (optional)
  */
-Verify.prototype.verifyProxy = function(proxy, startTime) {
+Verify.prototype.verifyProxy = function(proxy) {
     var _this = this;
-    startTime = startTime || new Date().getTime();
+    startTime = new Date().getTime();
 
     request({
         method: 'GET',

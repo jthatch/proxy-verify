@@ -1,0 +1,13 @@
+{
+  "name": "proxy-verify",
+  "version": "0.0.1",
+  "description": "A NodeJS command-line script to verify lists of proxies actually work",
+  "author": "jthatch",
+  "main": "verify.js",
+  "dependencies": {
+    "chalk": "~1.1.3",
+    "commander": "~2.9.0",
+    "moment": "^2.14.1",
+    "request": "latest"
+  }
+}

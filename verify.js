@@ -36,7 +36,6 @@ const EventEmitter = require('events').EventEmitter;
 
 const request = require('request');
 const chalk = require('chalk');
-const moment = require('moment');
 
 /**
  * This follows the observer design pattern. We take arguments first from options, then argv then resort to defaults
@@ -262,7 +261,7 @@ Verify.prototype.readProxies = function() {
     var _this = this;
 
     // if we find the variable {date} we'll replace it with todays date in the format dd-mm-yyyy
-    this.inputFile = String(this.inputFile).replace("{date}", moment().format('DD-MM-YYYY'));
+    this.inputFile = String(this.inputFile).replace("{date}", this.dateStamp());
 
     if (!fs.existsSync(this.inputFile)) {
         this.log("c:bgRed", "error: unable to read: " + this.inputFile);
@@ -326,7 +325,7 @@ Verify.prototype.readProxies = function() {
  */
 Verify.prototype.saveProxies = function() {
     var _this = this;
-    this.outputFile = String(this.outputFile).replace("{date}", moment().format('DD-MM-YYYY'));
+    this.outputFile = String(this.outputFile).replace("{date}", this.dateStamp());
     fs.writeFileSync(this.outputFile, this._verifiedProxies.join("\n"), "utf8");
     this.log("c:blue", "Saved verified proxies to ", "c:blue bold", this.outputFile);
 };
@@ -373,6 +372,16 @@ Verify.prototype.broadcastToWorkers = function(id, cmd, data){
  */
 Verify.prototype.broadcastToMaster = function(cmd, data) {
     process.send({ cmd: cmd, data: data });
+};
+
+/**
+ * Returns the date in the format DD-MM-YYYY
+ * @param Date dateObj (optional)
+ * @returns {string}
+ */
+Verify.prototype.dateStamp = function(dateObj) {
+    dateObj = dateObj || new Date();
+    return dateObj.toISOString().split('T')[0].split('-').reverse().join('-');
 };
 
 

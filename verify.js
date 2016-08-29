@@ -98,9 +98,7 @@ function Verify(options) {
 Verify.prototype.main = function() {
     var _this = this;
 
-    /**
-     * Master, responsible for pulling the list of media from the 4chan thread and spinning up and directing workers
-     */
+    // Our master thread appropriates tasks to all workers and coordinates the program flow
     if (cluster.isMaster) {
 
         _this.log("Verifying proxies using ", "c:bold", this.url,

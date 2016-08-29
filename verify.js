@@ -28,13 +28,15 @@
 
 'use strict';
 
+// internal nodejs libraries
 const fs = require('fs');
 const util = require('util');
 const path = require('path');
 const cluster = require('cluster');
 const EventEmitter = require('events').EventEmitter;
+const http = require('http');
+const url = require('url');
 
-const request = require('request');
 const chalk = require('chalk');
 
 /**
@@ -48,19 +50,24 @@ function Verify(options) {
     // number of instances of program to run
     this.workers = options.workers || require('os').cpus().length;
     // number of HTTP requests. Setting this too high might give false positives to broken proxies
-    this.concurrentRequests = options.concurrentRequests || 12;
+    this.concurrentRequests = options.concurrentRequests || this.workers * 30;
     // can be either a file path or a directory path containing files
     this.inputFile = options.inputFile ||
-        process.cwd() + '/proxies/fetched/fetched_proxies_{date}.txt'.replace(/\//g, path.sep);
+        'proxies/fetched/fetched_proxies_{date}.txt'.replace(/\//g, path.sep);
         //process.cwd() + '/proxies/fetched/'.replace(/\//g, path.sep);
     // where we store the verified proxies
     this.outputFile = options.outputFile ||
-        process.cwd() + '/proxies/verified/verified_proxies_{date}.txt'.replace(/\//g, path.sep);
+        'proxies/verified/verified_proxies_{date}.txt'.replace(/\//g, path.sep);
         //process.cwd() + "/proxies/verfied/verified_all.txt".replace(/\//g, path.sep);
     // the timeout before we cancel the request
-    this.requestTimeout = options.requestTimeout || 5e3;
+    this.requestTimeout = options.requestTimeout || 10000;
+    // enforce the timeout even if the proxy has established a connection
+    // use if you want to weed out slow running proxies
+    this.strictEnforceTimeout = options.strictEnforceTimeout || true;
     // show extra debug info
     this.verbose = options.verbose || false;
+    // store the speed of verify to a log file, appended for comparison
+    this.debug = options.debug || false;
 
     // hard limit, feel free to remove this, but I find anymore than 4 is overkill
     if (this.workers > 4)
@@ -75,10 +82,13 @@ function Verify(options) {
     this._verifiedProxies = [];
     this._workersFinished = 0;
     this._stats = {
-        good : 0,
-        bad : 0,
-        total: 0,
-        done : 0
+        good : 0, // good proxies
+        bad : 0, // bad
+        total: 0, // total proxies
+        done : 0, // incrementing counter
+        // for calculating average response times of proxies
+        responses : [],
+        avg : 0,
     }
     this._startTime = new Date().getTime();
 
@@ -93,9 +103,10 @@ Verify.prototype.main = function() {
      */
     if (cluster.isMaster) {
 
-        _this.log("c:blue", "Verifying proxies using ", "c:blue bold", this.url,
-            "c:blue", " with ", "c:blue bold", this.workers, "c:blue", " workers and ",
-            "c:blue bold", this.concurrentRequests, "c:blue", " concurrent requests.");
+        _this.log("Verifying proxies using ", "c:bold", this.url,
+            " with ", "c:bold", this.workers, " workers, ",
+            "c:bold", this.concurrentRequests, " concurrent requests",
+            " and a ", "c:bold", this.requestTimeout, "ms timeout");
 
         if (this.verbose)
             this.showOptions();
@@ -107,7 +118,7 @@ Verify.prototype.main = function() {
 
         // receive messages from our worker threads
         Object.keys(cluster.workers).forEach(function (id) {
-            _this.log("c:blue", "worker ", "c:blue bold", '#' + id, "c:blue", ' is online');
+            _this.log("worker ", "c:bold", '#' + id,' is online');
 
             cluster.workers[id].on('message', function (msg) {
                 if (msg.cmd) {
@@ -116,11 +127,11 @@ Verify.prototype.main = function() {
                             var data = msg.data;
                             _this._stats.done++;
                             var total = (_this._stats.done / _this._stats.total * 100).toFixed(0);
-
                             // good proxy
-                            if (!data.error) {
+                            if (!data.err) {
                                 _this._verifiedProxies.push(data.proxy);
                                 _this._stats.good++;
+                                _this._stats.responses.push(((new Date().getTime() - data.duration) / 1e3));
 
                                 _this.log("c:gray bold", total + '% ', "c:green", "\u2714 ", "c:green bold", data.proxy,
                                     "c:green", " in " + _this.runTime(data.duration), (_this.verbose ? chalk.gray.bold(' ' +
@@ -134,7 +145,7 @@ Verify.prototype.main = function() {
                             else {
                                 _this._stats.bad++;
                                 _this.log("c:gray bold", total + '% ', "c:red", "\u2716 ", "c:red bold", data.proxy,
-                                    "c:red", " error ", "c:red bold", data.error.code,
+                                    "c:red", " error ", "c:red bold", data.err.code,
                                     "c:red", " in " + _this.runTime(data.duration));
                             }
                             _this.dispatchRequest(id);
@@ -211,8 +222,49 @@ Verify.prototype.startWorkers = function(proxies) {
 Verify.prototype.verifyProxy = function(proxy) {
     var _this = this;
     var startTime = new Date().getTime();
+    var [host, port] = proxy.split(':');
+    var headerHost = url.parse(_this.url).hostname;
+    var r;
 
-    request({
+    if (this.strictEnforceTimeout) {
+        var timer = setTimeout(function() {
+            r.abort();
+            _this.broadcastToMaster('verifiedProxy',
+                {err: {code: 'STRICT_TIMEOUT'}, proxy: proxy, response: {},
+                duration: startTime});
+        }, _this.requestTimeout);
+    }
+
+    // it uses http 1.0
+    r = http.get({
+        host: host,
+        port: port,
+        method: 'GET',
+        path: _this.url,
+        headers: {
+            Host: headerHost,
+            'User-Agent' : _this.userAgent()
+        }
+    }, function(res) {
+        res.setEncoding('utf8');
+        res.setTimeout(_this.requestTimeout);
+        res.on('timeout', () => {
+            res.abort();
+        });
+        // seems like you need this listener to be present
+        res.on('data', function(){
+        });
+        res.on('end', function() {
+            clearTimeout(timer);
+            _this.broadcastToMaster('verifiedProxy', {err: null, proxy: proxy,
+                response: {}, duration: startTime});
+        });
+    }).on('error', function(err) {
+        clearTimeout(timer);
+        _this.broadcastToMaster('verifiedProxy', {err: err, proxy: proxy,
+            response: {}, duration: startTime});
+    });
+    /*request({
         method: 'GET',
         proxy: 'http://' + proxy,
         timeout : _this.requestTimeout,
@@ -221,8 +273,8 @@ Verify.prototype.verifyProxy = function(proxy) {
         },
         url: _this.url
     }, function (error, response) {
-        _this.broadcastToMaster('verifiedProxy', {proxy: proxy, error: error, response: response, duration: startTime});
-    });
+        _this.broadcastToMaster('verifiedProxy', {err: error, proxy: proxy, response: response, duration: startTime});
+    });*/
 };
 
 /**
@@ -241,11 +293,15 @@ Verify.prototype.dispatchRequest = function(id) {
         if (++this._workersFinished >= Math.min(this.concurrentRequests, this._stats.total)) {
             this.broadcastToWorkers(false, 'shutdown');
             this._workersFinished = 0;
+            var sum = this._stats.responses.reduce( function(a,b) { return a + b; });
+            this._stats.avg = (sum / this._stats.good).toFixed(2);
             _this.log();
-            _this.log("c:blue", "Process Complete. Processed ", "c:blue bold", _this._stats.total, "c:blue", " proxies " +
-                "in ", "c:blue bold", _this.runTime());
+            _this.log("Processed ", "c:bold", _this._stats.total, " proxies " +
+                "in ", "c:bold", _this.runTime());
             _this.log("c:green bold", _this._stats.good, "c:green", " proxies verified (",
-                "c:green bold", (_this._stats.good / _this._stats.total * 100).toFixed(2) + '%', "c:green", ')');
+                "c:green bold", (_this._stats.good / _this._stats.total * 100).toFixed(2) +
+                '%', "c:green", ')', "c:green", " Avg Response: ", "c:green bold",
+                _this._stats.avg + 's');
 
             this.saveProxies();
         }
@@ -303,9 +359,9 @@ Verify.prototype.readProxies = function() {
     });
 
     if (stats.isFile())
-        _this.log("c:blue", "Found ", "c:blue bold", proxies.length, "c:blue", " proxies in ", "c:blue bold", this.inputFile);
+        _this.log("Found ", "c:bold", proxies.length, " proxies in ", "c:bold", this.inputFile);
     else
-        _this.log("Found ", "c:green bold", proxies.length, " proxies in ", "c:green bold",  files.length, " files: ", files.join(', '));
+        _this.log("Found ", "c:bold", proxies.length, " proxies in ", "c:bold",  files.length, " files: ", files.join(', '));
 
     var oldTotal = proxies.length;
     // now filter duplicates
@@ -313,7 +369,7 @@ Verify.prototype.readProxies = function() {
         return index == self.indexOf(proxy);
     });
     if (oldTotal - proxies.length > 0) {
-        _this.log("Removing duplicates, found ", "c:blue bold", (oldTotal - proxies.length), " duplicates");
+        _this.log("Removing duplicates, found ", "c:bold", (oldTotal - proxies.length), " duplicates");
     }
 
     this.emit('readProxies', proxies);
@@ -327,7 +383,17 @@ Verify.prototype.saveProxies = function() {
     var _this = this;
     this.outputFile = String(this.outputFile).replace("{date}", this.dateStamp());
     fs.writeFileSync(this.outputFile, this._verifiedProxies.join("\n"), "utf8");
-    this.log("c:blue", "Saved verified proxies to ", "c:blue bold", this.outputFile);
+    this.log("c:cyan", "Saved verified proxies to ", "c:cyan bold", this.outputFile);
+
+    if (this.debug) {
+        var debug = "Proxies: " + this._stats.total + " Good: " + this._stats.good +
+        " (" +  (this._stats.good / this._stats.total * 100).toFixed(2) + "%)" +
+        " Avg Response: " + this._stats.avg + "s" +
+        " Workers: " + this.workers + " Threads: " + this.concurrentRequests +
+        " Timeout: " + this.requestTimeout + " Time: " + this.runTime() + "\n";
+        fs.appendFileSync('debug_verify.log', debug);
+        this.log(debug);
+    }
 };
 
 
@@ -518,13 +584,15 @@ if (process.argv[1] == __filename) {
         .option("-w, --workers [workers]", "The number of workers to use")
         .option("-c, --requests [requests]", "The number of concurrent requests to make. Try to make it multiple of workers")
         .option("-t, --timeout [timeout]", "Timeout in ms before to kill the socket")
+        .option("-s, --strict", "Strict enforce timeout to weed out active but slow proxies")
         .option("-v, --verbose", "Show verbose output")
+        .option("-d, --debug", "Debug stores speed output to debug_verify.log")
         .parse(process.argv);
 
     var opts = {};
     if (program.all) {
-        opts.inputFile = process.cwd() + '/proxies/fetched/'.replace(/\//g, path.sep);
-        opts.outputFile = process.cwd() + '/proxies/verified/verified_all.txt'.replace(/\//g, path.sep);
+        opts.inputFile = 'proxies/fetched/'.replace(/\//g, path.sep);
+        opts.outputFile = 'proxies/verified/verified_all.txt'.replace(/\//g, path.sep);
     }
     if (program.input)
         opts.inputFile = program.input;
@@ -537,9 +605,13 @@ if (process.argv[1] == __filename) {
     if (program.requests)
         opts.concurrentRequests = program.requests;
     if (program.timeout)
-        opts.requestTimeout = program.timeout;
+        opts.requestTimeout = parseInt(program.timeout);
+    if (program.strict)
+        opts.strictEnforceTimeout = program.strict;
     if (program.verbose)
         opts.verbose = program.verbose;
+    if (program.debug)
+        opts.debug = program.debug;
 
     var verify = new Verify(opts);
     verify.main();

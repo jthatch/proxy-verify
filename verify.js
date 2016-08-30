@@ -26,6 +26,7 @@
  * file that was distributed with this source code.
  */
 
+/*jshint esversion: 6 */
 'use strict';
 
 // internal nodejs libraries
@@ -49,6 +50,9 @@ function Verify(options) {
     this.url = options.url || "http://digg.com/";
     // number of instances of program to run
     this.workers = options.workers || require('os').cpus().length;
+    // hard limit, feel free to remove this, but I find anymore than 4 is overkill
+    if (this.workers > 4)
+        this.workers = 4;
     // number of HTTP requests. Setting this too high might give false positives to broken proxies
     this.concurrentRequests = options.concurrentRequests || this.workers * 30;
     // can be either a file path or a directory path containing files
@@ -69,10 +73,6 @@ function Verify(options) {
     // store the speed of verify to a log file, appended for comparison
     this.debug = options.debug || false;
 
-    // hard limit, feel free to remove this, but I find anymore than 4 is overkill
-    if (this.workers > 4)
-        this.workers = 4;
-
     // No point having workers that do nothing, so set the no. of concurrent requests to match the no. of workers
     if (this.workers > this.concurrentRequests)
         this.concurrentRequests = this.workers;
@@ -88,8 +88,8 @@ function Verify(options) {
         done : 0, // incrementing counter
         // for calculating average response times of proxies
         responses : [],
-        avg : 0,
-    }
+        avg : 0
+    };
     this._startTime = new Date().getTime();
 
     EventEmitter.call(this);
@@ -104,7 +104,7 @@ Verify.prototype.main = function() {
         _this.log("Verifying proxies using ", "c:bold", this.url,
             " with ", "c:bold", this.workers, " workers, ",
             "c:bold", this.concurrentRequests, " concurrent requests",
-            " and a ", "c:bold", this.requestTimeout, "ms timeout");
+            " and a ", (this.strictEnforceTimeout ? chalk.bold('strict ') : ''), "c:bold", this.requestTimeout, "ms timeout");
 
         if (this.verbose)
             this.showOptions();
@@ -124,7 +124,7 @@ Verify.prototype.main = function() {
                         case 'verifiedProxy':
                             var data = msg.data;
                             _this._stats.done++;
-                            var total = (_this._stats.done / _this._stats.total * 100).toFixed(0);
+                            var total = Math.round(_this._stats.done / _this._stats.total * 100);
                             // good proxy
                             if (!data.err) {
                                 _this._verifiedProxies.push(data.proxy);
@@ -133,7 +133,7 @@ Verify.prototype.main = function() {
 
                                 _this.log("c:gray bold", total + '% ', "c:green", "\u2714 ", "c:green bold", data.proxy,
                                     "c:green", " in " + _this.runTime(data.duration), (_this.verbose ? chalk.gray.bold(' ' +
-                                        JSON.stringify(data.response.headers).replace(/":"/g, ",")
+                                        JSON.stringify(data.headers).replace(/":"/g, ",")
                                             .replace(/"/g, '')
                                             .replace(/\{/g, '')
                                             .substr(0, 100))
@@ -146,7 +146,36 @@ Verify.prototype.main = function() {
                                     "c:red", " error ", "c:red bold", data.err.code,
                                     "c:red", " in " + _this.runTime(data.duration));
                             }
-                            _this.dispatchRequest(id);
+                            if (_this._stats.done == _this._stats.total) {
+                                _this.broadcastToWorkers(false, 'shutdown');
+                                _this._workersFinished = 0;
+                                if (_this._stats.good < 1) {
+                                    _this.log();
+                                    _this.log('c:red', "No verified proxies :(");
+                                    return false;
+                                }
+                                else {
+                                    var sum = _this._stats.responses.reduce(function (a, b) {
+                                        return a + b;
+                                    });
+                                    _this._stats.avg = (sum / _this._stats.good).toFixed(2);
+
+                                    _this.log();
+                                    _this.log("Processed ", "c:bold", _this._stats.total, " proxies " +
+                                    "in ", "c:bold", _this.runTime());
+                                    _this.log("c:green bold", _this._stats.good, "c:green", " proxies verified (",
+                                        "c:green bold", (_this._stats.good / _this._stats.total * 100).toFixed(2) +
+                                        '%', "c:green", ')', "c:green", " Avg Response: ", "c:green bold",
+                                        _this._stats.avg + 's');
+
+                                    _this.saveProxies();
+                                    return false;
+                                }
+                            }
+                            else {
+                                _this.dispatchRequest(id);
+                            }
+
                             break;
                     }
                 }
@@ -154,9 +183,15 @@ Verify.prototype.main = function() {
         });
 
         // bind our callbacks
-        _this.on('readProxies', function(proxies){_this.startWorkers(proxies)});
+        _this.on('readProxies', function(proxies){
+            // Ensure we dont have more concurrentRequests than proxies
+            if (_this.concurrentRequests > proxies.length)
+                _this.concurrentRequests = proxies.length;
 
-        // now initate the first function to read our proxies
+            _this.startWorkers(proxies);
+        });
+
+        // now initiate the first function to read our proxies
         if (!this.readProxies())
             process.exit();
 
@@ -223,17 +258,20 @@ Verify.prototype.verifyProxy = function(proxy) {
     var [host, port] = proxy.split(':');
     var headerHost = url.parse(_this.url).hostname;
     var r;
-
+    var returned = false;
+    var returnBroadcast = function(data) {
+        if (returned)
+            return false;
+        returned = true;
+            _this.broadcastToMaster('verifiedProxy',data);
+    };
     if (this.strictEnforceTimeout) {
         var timer = setTimeout(function() {
             r.abort();
-            _this.broadcastToMaster('verifiedProxy',
-                {err: {code: 'STRICT_TIMEOUT'}, proxy: proxy, response: {},
-                duration: startTime});
+            returnBroadcast({err: {code: 'STRICT_TIMEOUT'}, proxy: proxy, response: {}, duration: startTime});
         }, _this.requestTimeout);
     }
 
-    // it uses http 1.0
     r = http.get({
         host: host,
         port: port,
@@ -244,9 +282,10 @@ Verify.prototype.verifyProxy = function(proxy) {
             'User-Agent' : _this.userAgent()
         }
     }, function(res) {
+
         res.setEncoding('utf8');
         res.setTimeout(_this.requestTimeout);
-        res.on('timeout', () => {
+        res.on('timeout', function() {
             res.abort();
         });
         // seems like you need this listener to be present
@@ -254,25 +293,12 @@ Verify.prototype.verifyProxy = function(proxy) {
         });
         res.on('end', function() {
             clearTimeout(timer);
-            _this.broadcastToMaster('verifiedProxy', {err: null, proxy: proxy,
-                response: {}, duration: startTime});
+            returnBroadcast({err: null, proxy: proxy, headers: res.headers, duration: startTime});
         });
     }).on('error', function(err) {
         clearTimeout(timer);
-        _this.broadcastToMaster('verifiedProxy', {err: err, proxy: proxy,
-            response: {}, duration: startTime});
+        returnBroadcast({err: err, proxy: proxy, headers: {}, duration: startTime});
     });
-    /*request({
-        method: 'GET',
-        proxy: 'http://' + proxy,
-        timeout : _this.requestTimeout,
-        headers: {
-            "User-Agent":_this.userAgent()
-        },
-        url: _this.url
-    }, function (error, response) {
-        _this.broadcastToMaster('verifiedProxy', {err: error, proxy: proxy, response: response, duration: startTime});
-    });*/
 };
 
 /**
@@ -281,28 +307,11 @@ Verify.prototype.verifyProxy = function(proxy) {
  */
 Verify.prototype.dispatchRequest = function(id) {
     var _this = this;
-
+    //this._workersFinished++;
     // If we still have proxies available to verify, send them to the worker id
     if (this._proxies.length) {
         var proxy = this._proxies.shift();
         this.broadcastToWorkers(id, 'verifyProxy', proxy);
-    }
-    else {
-        if (++this._workersFinished >= Math.min(this.concurrentRequests, this._stats.total)) {
-            this.broadcastToWorkers(false, 'shutdown');
-            this._workersFinished = 0;
-            var sum = this._stats.responses.reduce( function(a,b) { return a + b; });
-            this._stats.avg = (sum / this._stats.good).toFixed(2);
-            _this.log();
-            _this.log("Processed ", "c:bold", _this._stats.total, " proxies " +
-                "in ", "c:bold", _this.runTime());
-            _this.log("c:green bold", _this._stats.good, "c:green", " proxies verified (",
-                "c:green bold", (_this._stats.good / _this._stats.total * 100).toFixed(2) +
-                '%', "c:green", ')', "c:green", " Avg Response: ", "c:green bold",
-                _this._stats.avg + 's');
-
-            this.saveProxies();
-        }
     }
 };
 
@@ -337,7 +346,7 @@ Verify.prototype.readProxies = function() {
     // Read a directory using sync. This will lock the program until the files have been read.
     // Not such an issue for command line scripts
     else {
-        var files = fs.readdirSync(this.inputFile);
+        files = fs.readdirSync(this.inputFile);
         files = files.filter(function (file) {
             if (file[0] != '.') {
                 return file;
@@ -533,7 +542,7 @@ Verify.prototype.runTime = function(startTime) {
     if (elapsed.mins > 0) {
         str += chalk.bold(elapsed.mins) + 'm ' ;
     }
-    if (( elapsed.secs > 0 && showMs ) || ( elapsed.secs == 0 && elapsed.ms > 0 ) ) {
+    if (( elapsed.secs > 0 && showMs ) || ( elapsed.secs === 0 && elapsed.ms > 0 ) ) {
         str += chalk.bold(elapsed.secs) + '.' + chalk.bold(elapsed.ms) + 's';
     }
     else {

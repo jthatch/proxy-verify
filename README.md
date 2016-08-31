@@ -6,15 +6,15 @@ verify.js takes a list of HTTP proxies and will attempt to establish a connectio
 You can specify the unverified proxies as either the path to a single file, or a directory containing multiple files. The script expects the file(s) to contain proxies in the below format:  
 `127.0.0.1:8080` -- ip:port, each on a new line.
 
-verify-proxy is written and maintained by [jthatch](https://github.com/jthatch).
+proxy-verify is written and maintained by [jthatch](https://github.com/jthatch).
 
 ![verify.js screenshot](http://wireside.co.uk/verify-screenshot.png)
 
 ## Installation
 verify.js requires NodeJS and NPM, both of which are available via your default package manager, e.g. apt-get or yum. To install with a few commands, open a terminal and enter the following:
 ```
-git clone https://github.com/jthatch/verify-proxy.git  
-cd verify-proxy
+git clone https://github.com/jthatch/proxy-verify.git  
+cd proxy-verify
 npm install
 ```
 

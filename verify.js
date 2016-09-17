@@ -8,6 +8,7 @@
  * ip:port
  *
  * Installation:
+ * 
  * Copy verify.js into it's own directory then run:
  * > npm install
  * > chmod +x verify.js
@@ -18,6 +19,23 @@
  * Will read a the input proxies from the file proxies.txt and save verified proxies to proxies_verified.txt
  *
  * ./verify.js -i proxies/ -o proxies_verified.txt -u "http://digg.com"
+ * 
+ * As a module:
+ * 
+ * This script can also be used as a module, which is helpful if you want to control the flow to and from the program
+ * to do this use the following in your new file:
+ * 
+ *  const Verify = require('./verify');
+ *  var verifyObj = { url: 'http://google.com'}  // all options are available here
+ *  var verify = new Verify(verifyObj);
+ *  verify.main();
+ * 
+ *  // you can also listen for events (all events are the same in verify but prepended w/ ext)
+ *  verify.on('extverifiedProxy', function(data) { .. });
+ * 
+ * A full list of events are here:
+ *  extverifiedProxy, (data)
+ *  extdone, ()
  *
  *
  * (c) jthatch http://github.com/jthatch
@@ -57,11 +75,11 @@ function Verify(options) {
     this.concurrentRequests = options.concurrentRequests || this.workers * 30;
     // can be either a file path or a directory path containing files
     this.inputFile = options.inputFile ||
-        'proxies/fetched/fetched_proxies_{date}.txt'.replace(/\//g, path.sep);
+        __dirname + '/proxies/fetched/fetched_proxies_{date}.txt'.replace(/\//g, path.sep);
         //process.cwd() + '/proxies/fetched/'.replace(/\//g, path.sep);
     // where we store the verified proxies
     this.outputFile = options.outputFile ||
-        'proxies/verified/verified_proxies_{date}.txt'.replace(/\//g, path.sep);
+        __dirname + '/proxies/verified/verified_proxies_{date}.txt'.replace(/\//g, path.sep);
         //process.cwd() + "/proxies/verfied/verified_all.txt".replace(/\//g, path.sep);
     // the timeout before we cancel the request
     this.requestTimeout = options.requestTimeout || 10000;
@@ -72,6 +90,10 @@ function Verify(options) {
     this.verbose = options.verbose || false;
     // store the speed of verify to a log file, appended for comparison
     this.debug = options.debug || false;
+    // disable output
+    this.noOutput = options.noOutput || false;
+    // regex for matching body content, you don't need the enclosing /. this will inc a counter each time a match occurs
+    this.regex = options.regex || false;
 
     // No point having workers that do nothing, so set the no. of concurrent requests to match the no. of workers
     if (this.workers > this.concurrentRequests)
@@ -86,6 +108,7 @@ function Verify(options) {
         bad : 0, // bad
         total: 0, // total proxies
         done : 0, // incrementing counter
+        regex: 0, // regex incrementing counter
         // for calculating average response times of proxies
         responses : [],
         avg : 0
@@ -104,7 +127,18 @@ Verify.prototype.main = function() {
         _this.log("Verifying proxies using ", "c:bold", this.url,
             " with ", "c:bold", this.workers, " workers, ",
             "c:bold", this.concurrentRequests, " concurrent requests",
-            " and a ", (this.strictEnforceTimeout ? chalk.bold('strict ') : ''), "c:bold", this.requestTimeout, "ms timeout");
+            " and a ", (this.strictEnforceTimeout ? chalk.bold('strict ') : ''), "c:bold", this.requestTimeout, "ms timeout",
+            (this.regex ? 'using regex /' + this.regex + '/' : ''));
+
+        if (this.debug) {
+            var date = new Date().toISOString().substring(0,19).replace('T', ' ');
+            var debug = date + " URL: " +this.url +
+            " Workers: " + this.workers + " Requests: " +
+            this.concurrentRequests +
+            " " + (this.strictEnforceTimeout ? 'Strict Timeout: ' : 'Timeout: ') + this.requestTimeout +
+            (this.regex ? ' Regex: /' + this.regex + '/' : '') + "\n";
+            this.debugLog(debug);
+        }
 
         if (this.verbose)
             this.showOptions();
@@ -123,6 +157,9 @@ Verify.prototype.main = function() {
                     switch (msg.cmd) {
                         case 'verifiedProxy':
                             var data = msg.data;
+                            
+                            // emit for use as a module
+                            _this.emit('extVerifiedProxy', data);
                             _this._stats.done++;
                             var total = Math.round(_this._stats.done / _this._stats.total * 100);
                             // good proxy
@@ -131,13 +168,25 @@ Verify.prototype.main = function() {
                                 _this._stats.good++;
                                 _this._stats.responses.push(((new Date().getTime() - data.duration) / 1e3));
 
+                                // attempt to match body content
+                                if (_this.regex) {
+                                    var re = new RegExp(_this.regex);
+                                    // easier to just convert it to a string
+                                    if (re.exec(JSON.stringify(data.data))) {
+                                        _this._stats.regex++;
+                                    }
+                                }
+
                                 _this.log("c:gray bold", total + '% ', "c:green", "\u2714 ", "c:green bold", data.proxy,
-                                    "c:green", " in " + _this.runTime(data.duration), (_this.verbose ? chalk.gray.bold(' ' +
-                                        JSON.stringify(data.headers).replace(/":"/g, ",")
+                                    "c:green", " in " + _this.runTime(data.duration), 
+                                    (_this.regex ? (chalk.green(' [') + chalk.green.bold(_this._stats.regex) + chalk.green('] ')) : ''),
+                                    (_this.verbose ? chalk.gray.bold(' ' +
+                                        JSON.stringify(data.data).replace(/":"/g, ",") // headers
                                             .replace(/"/g, '')
                                             .replace(/\{/g, '')
                                             .substr(0, 100))
-                                        : '')
+                                        : ''
+                                    )
                                 );
                             }
                             else {
@@ -148,6 +197,7 @@ Verify.prototype.main = function() {
                             }
                             if (_this._stats.done == _this._stats.total) {
                                 _this.broadcastToWorkers(false, 'shutdown');
+                                _this.emit('extdone');
                                 _this._workersFinished = 0;
                                 if (_this._stats.good < 1) {
                                     _this.log();
@@ -165,7 +215,7 @@ Verify.prototype.main = function() {
                                     "in ", "c:bold", _this.runTime());
                                     _this.log("c:green bold", _this._stats.good, "c:green", " proxies verified (",
                                         "c:green bold", (_this._stats.good / _this._stats.total * 100).toFixed(2) +
-                                        '%', "c:green", ')', "c:green", " Avg Response: ", "c:green bold",
+                                        '%', "c:green", ')', "c:green", " Avg latency: ", "c:green bold",
                                         _this._stats.avg + 's');
 
                                     _this.saveProxies();
@@ -213,13 +263,6 @@ Verify.prototype.main = function() {
                         break;
                 }
             }
-        });
-
-        this.on('goodProxy', function (data) {
-            _this.broadcastToMaster('goodProxy', data);
-        });
-        this.on('badProxy', function (data) {
-            _this.broadcastToMaster('badProxy', data);
         });
 
     }
@@ -282,6 +325,7 @@ Verify.prototype.verifyProxy = function(proxy) {
             'User-Agent' : _this.userAgent()
         }
     }, function(res) {
+        var data = '';
 
         res.setEncoding('utf8');
         res.setTimeout(_this.requestTimeout);
@@ -289,11 +333,12 @@ Verify.prototype.verifyProxy = function(proxy) {
             res.abort();
         });
         // seems like you need this listener to be present
-        res.on('data', function(){
+        res.on('data', function(d){
+            data += d;
         });
         res.on('end', function() {
             clearTimeout(timer);
-            returnBroadcast({err: null, proxy: proxy, headers: res.headers, duration: startTime});
+            returnBroadcast({err: null, proxy: proxy, headers: res.headers, data: data, duration: startTime});
         });
     }).on('error', function(err) {
         clearTimeout(timer);
@@ -372,9 +417,12 @@ Verify.prototype.readProxies = function() {
 
     var oldTotal = proxies.length;
     // now filter duplicates
-    proxies = proxies.filter(function(proxy, index, self) {
+    /*proxies = proxies.filter(function(proxy, index, self) {
         return index == self.indexOf(proxy);
-    });
+    });*/
+    // es6 way of removing dupes, taken from http://stackoverflow.com/questions/9229645/remove-duplicates-from-javascript-array
+    proxies =  Array.from(new Set(proxies));
+
     if (oldTotal - proxies.length > 0) {
         _this.log("Removing duplicates, found ", "c:bold", (oldTotal - proxies.length), " duplicates");
     }
@@ -393,12 +441,14 @@ Verify.prototype.saveProxies = function() {
     this.log("c:cyan", "Saved verified proxies to ", "c:cyan bold", this.outputFile);
 
     if (this.debug) {
-        var debug = "Proxies: " + this._stats.total + " Good: " + this._stats.good +
+        var date = new Date().toISOString().substring(0,19).replace('T', ' ');
+        var debug = date + " Proxies: " + this._stats.total + " Good: " + this._stats.good +
         " (" +  (this._stats.good / this._stats.total * 100).toFixed(2) + "%)" +
+        (this.regex ? ' Regex /' + this.regex + '/: ' + this._stats.regex : '') +
         " Avg Response: " + this._stats.avg + "s" +
         " Workers: " + this.workers + " Threads: " + this.concurrentRequests +
         " Timeout: " + this.requestTimeout + " Time: " + this.runTime() + "\n";
-        fs.appendFileSync('debug_verify.log', debug);
+        this.debugLog(debug);
         this.log(debug);
     }
 };
@@ -411,6 +461,12 @@ Verify.prototype.showOptions = function() {
     console.log('concurrentRequests: ' + this.concurrentRequests);
     console.log('inputFile: ' + this.inputFile);
     console.log('outputFile: ' + this.outputFile);
+};
+
+Verify.prototype.debugLog = function(msg, filename) {
+    if (!filename)
+        filename = __dirname + '/debug_verify.log';
+    fs.appendFileSync(filename, msg);
 };
 
 
@@ -444,6 +500,7 @@ Verify.prototype.broadcastToWorkers = function(id, cmd, data){
  * @param array|object payload
  */
 Verify.prototype.broadcastToMaster = function(cmd, data) {
+    this.emit('ext'+ cmd, data);
     process.send({ cmd: cmd, data: data });
 };
 
@@ -466,6 +523,9 @@ Verify.prototype.dateStamp = function(dateObj) {
  * this.log('c:bgGreen bold', 'This is bold text with a green background');
  */
 Verify.prototype.log = function() {
+    if (this.noOutput)
+        return false;
+
     var args = Array.prototype.slice.call(arguments);
     var msg = '';
     var skipNext = false;
@@ -545,7 +605,7 @@ Verify.prototype.runTime = function(startTime) {
     if (( elapsed.secs > 0 && showMs ) || ( elapsed.secs === 0 && elapsed.ms > 0 ) ) {
         str += chalk.bold(elapsed.secs) + '.' + chalk.bold(elapsed.ms) + 's';
     }
-    else {
+    else if (elapsed.secs > 0) {
         str += chalk.bold(elapsed.secs) + 's';
     }
     return str;
@@ -594,12 +654,14 @@ if (process.argv[1] == __filename) {
         .option("-s, --strict", "Strict enforce timeout to weed out active but slow proxies")
         .option("-v, --verbose", "Show verbose output")
         .option("-d, --debug", "Debug stores speed output to debug_verify.log")
+        .option("-n, --nooutput", "Disable all output")
+        .option("-r, --regex [regex]", "Will use regex to match body content, if matched will increment a counter displayed at the end")
         .parse(process.argv);
 
     var opts = {};
     if (program.all) {
-        opts.inputFile = 'proxies/fetched/'.replace(/\//g, path.sep);
-        opts.outputFile = 'proxies/verified/verified_all.txt'.replace(/\//g, path.sep);
+        opts.inputFile = __dirname + '/proxies/fetched/'.replace(/\//g, path.sep);
+        opts.outputFile = __dirname + '/proxies/verified_all.txt'.replace(/\//g, path.sep);
     }
     if (program.input)
         opts.inputFile = program.input;
@@ -619,10 +681,14 @@ if (process.argv[1] == __filename) {
         opts.verbose = program.verbose;
     if (program.debug)
         opts.debug = program.debug;
+    if (program.nooutput)
+        opts.nooutput = program.nooutput;
+    if (program.regex)
+        opts.regex = program.regex;
 
     var verify = new Verify(opts);
     verify.main();
 }
 else {
-    module.exports = new Verify();
+    module.exports = Verify;
 }

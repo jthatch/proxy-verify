@@ -30,7 +30,11 @@ verify.js should automatically be marked as executable, if not enter chmod +x ve
 
 
 ## Real World Examples
-Takes a bunch of proxies in proxies.txt verifies them against yahoo.com and saves the good ones to  proxies_good.txt
-`./verify.js -i proxies.txt -o proxies_good.txt -u "http://yahoo.com"`
-
-
+Basic. Using https://github.com/jthatch/proxy-fetch to grab the latest proxies  
+`./fetch.js && ./verify.js`  
+Show debugging output and verbosity  
+`./verify.js -d -v`  
+Using example.com, match body content with regex. will show an incrementing counter each time 'success' is found in the body content   
+`./verify.js -v -u "http://example.com" -r "success"`  
+Takes a bunch of proxies in proxies.txt verifies them against yahoo.com and saves the good ones to  proxies_good.txt  
+`./verify.js -i proxies.txt -o proxies_good.txt -u "http://yahoo.com"`  

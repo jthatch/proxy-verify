@@ -1,7 +1,7 @@
 proxy-verify
 ================
 
-verify.js takes a list of HTTP proxies and will attempt to establish a connection to a target site using each proxy. The proxies that successfully connect and eable you to hide your own IP will be saved.
+verify.js takes a list of HTTP proxies and will attempt to establish a connection to a target site using each proxy. The proxies that successfully connect and enable you to hide your own IP will be saved.
 
 You can specify the unverified proxies as either the path to a single file, or a directory containing multiple files. The script expects the file(s) to contain proxies in the below format:  
 `127.0.0.1:8080` -- ip:port, each on a new line.

@@ -85,7 +85,9 @@ function Verify(options) {
     this.requestTimeout = options.requestTimeout || 10000;
     // enforce the timeout even if the proxy has established a connection
     // use if you want to weed out slow running proxies
-    this.strictEnforceTimeout = options.strictEnforceTimeout || true;
+    this.strict = options.strict || true;
+    // for ip lookup
+    this.ip = options.ip || false;
     // show extra debug info
     this.verbose = options.verbose || false;
     // store the speed of verify to a log file, appended for comparison
@@ -98,6 +100,10 @@ function Verify(options) {
     // No point having workers that do nothing, so set the no. of concurrent requests to match the no. of workers
     if (this.workers > this.concurrentRequests)
         this.concurrentRequests = this.workers;
+
+    // if strict we'll use iplookup.flashfxp.com wihch returns the originating ip address to confirm our proxy
+    if (this.ip)
+        this.url = "http://iplookup.flashfxp.com/";
 
     // internal variables
     this._proxies = [];
@@ -127,7 +133,7 @@ Verify.prototype.main = function() {
         _this.log("Verifying proxies using ", "c:bold", this.url,
             " with ", "c:bold", this.workers, " workers, ",
             "c:bold", this.concurrentRequests, " concurrent requests",
-            " and a ", (this.strictEnforceTimeout ? chalk.bold('strict ') : ''), "c:bold", this.requestTimeout, "ms timeout",
+            " and a ", (this.strict ? chalk.bold('strict ') : ''), "c:bold", this.requestTimeout, "ms timeout",
             (this.regex ? 'using regex /' + this.regex + '/' : ''));
 
         if (this.debug) {
@@ -135,7 +141,7 @@ Verify.prototype.main = function() {
             var debug = date + " URL: " +this.url +
             " Workers: " + this.workers + " Requests: " +
             this.concurrentRequests +
-            " " + (this.strictEnforceTimeout ? 'Strict Timeout: ' : 'Timeout: ') + this.requestTimeout +
+            " " + (this.strict ? 'Strict Timeout: ' : 'Timeout: ') + this.requestTimeout +
             (this.regex ? ' Regex: /' + this.regex + '/' : '') + "\n";
             this.debugLog(debug);
         }
@@ -299,6 +305,8 @@ Verify.prototype.verifyProxy = function(proxy) {
     var _this = this;
     var startTime = new Date().getTime();
     var [host, port] = proxy.split(':');
+    var randInt = Math.round(Math.random()*10000);
+    _this.url = _this.url.replace(/{randint}/g, randInt);
     var headerHost = url.parse(_this.url).hostname;
     var r;
     var returned = false;
@@ -306,12 +314,14 @@ Verify.prototype.verifyProxy = function(proxy) {
         if (returned)
             return false;
         returned = true;
-            _this.broadcastToMaster('verifiedProxy',data);
+        data.duration = startTime;
+        data.proxy = proxy;
+        _this.broadcastToMaster('verifiedProxy',data);
     };
-    if (this.strictEnforceTimeout) {
+    if (this.strict) {
         var timer = setTimeout(function() {
             r.abort();
-            returnBroadcast({err: {code: 'STRICT_TIMEOUT'}, proxy: proxy, response: {}, duration: startTime});
+            returnBroadcast({err: {code: 'STRICT_TIMEOUT'},  response: {}});
         }, _this.requestTimeout);
     }
 
@@ -338,11 +348,21 @@ Verify.prototype.verifyProxy = function(proxy) {
         });
         res.on('end', function() {
             clearTimeout(timer);
-            returnBroadcast({err: null, proxy: proxy, headers: res.headers, data: data, duration: startTime});
+            if (_this.ip) {
+                if (data != host) {
+                    returnBroadcast({err: {code:"PROXY_MISMATCH"}, headers: res.headers, data: data});
+                }
+                else {
+                    returnBroadcast({err: null, headers: res.headers, data: data});
+                }
+            }
+            else {
+                returnBroadcast({err: null, headers: res.headers, data: data});
+            }
         });
     }).on('error', function(err) {
         clearTimeout(timer);
-        returnBroadcast({err: err, proxy: proxy, headers: {}, duration: startTime});
+        returnBroadcast({err: err, headers: {}});
     });
 };
 
@@ -367,40 +387,59 @@ Verify.prototype.dispatchRequest = function(id) {
  */
 Verify.prototype.readProxies = function() {
     var _this = this;
-
-    // if we find the variable {date} we'll replace it with todays date in the format dd-mm-yyyy
-    this.inputFile = String(this.inputFile).replace("{date}", this.dateStamp());
-
-    if (!fs.existsSync(this.inputFile)) {
-        this.log("c:bgRed", "error: unable to read: " + this.inputFile);
-        return false;
-    }
-
-    var stats = fs.statSync(this.inputFile);
-
+    
     var files = [];
     var proxies = [];
     var readFile = function(fileName) {
         proxies.push.apply(proxies, fs.readFileSync(fileName).toString('utf8').split('\n'));
     };
 
-    // Single file mode
-    if (stats.isFile()) {
-        readFile(this.inputFile);
-    }
-    // Read a directory using sync. This will lock the program until the files have been read.
-    // Not such an issue for command line scripts
-    else {
-        files = fs.readdirSync(this.inputFile);
-        files = files.filter(function (file) {
-            if (file[0] != '.') {
-                return file;
+    // if it's an array of input files let's iterate over them
+    if (typeof _this.inputFile == 'object') {
+        this.inputFile.forEach( (val, index, arr) => {
+            var inputFile = val.trim();
+
+            inputFile = String(inputFile).replace("{date}", _this.dateStamp());
+
+            if (fs.existsSync(inputFile)) {
+                readFile(inputFile);
             }
-        });
-        files.map(function (file) {
-            var fileName = _this.inputFile + file;
-            readFile(fileName);
-        });
+            else {
+                _this.log("c:bgRed", "error: unable to read: " + inputFile);
+                return false;
+            }
+        })
+    }
+    // Otherwise inputFile could be either a single file or a directory
+    else {
+        // if we find the variable {date} we'll replace it with todays date in the format dd-mm-yyyy
+        this.inputFile = String(this.inputFile).replace("{date}", this.dateStamp());
+
+        if (!fs.existsSync(this.inputFile)) {
+            this.log("c:bgRed", "error: unable to read: " + this.inputFile);
+            return false;
+        }
+
+        var stats = fs.statSync(this.inputFile);
+
+        // Single file mode
+        if (stats.isFile()) {
+            readFile(this.inputFile);
+        }
+        // Read a directory using sync. This will lock the program until the files have been read.
+        // Not such an issue for command line scripts
+        else {
+            files = fs.readdirSync(this.inputFile);
+            files = files.filter(function (file) {
+                if (file[0] != '.') {
+                    return file;
+                }
+            });
+            files.map(function (file) {
+                var fileName = _this.inputFile + file;
+                readFile(fileName);
+            });
+        }
     }
 
     // validate proxies using ip:port
@@ -410,10 +449,15 @@ Verify.prototype.readProxies = function() {
             return proxy;
     });
 
-    if (stats.isFile())
-        _this.log("Found ", "c:bold", proxies.length, " proxies in ", "c:bold", this.inputFile);
-    else
-        _this.log("Found ", "c:bold", proxies.length, " proxies in ", "c:bold",  files.length, " files: ", files.join(', '));
+    if (typeof this.inputFile == 'object') {
+        this.log("Found ", "c:bold", proxies.length, " proxies in ", "c:bold",  this.inputFile.length, " files: ", this.inputFile.join(', '));
+    }
+    else {
+        if (stats.isFile())
+            _this.log("Found ", "c:bold", proxies.length, " proxies in ", "c:bold", this.inputFile);
+        else
+            _this.log("Found ", "c:bold", proxies.length, " proxies in ", "c:bold",  files.length, " files: ", files.join(', '));
+    }
 
     var oldTotal = proxies.length;
     // now filter duplicates
@@ -437,8 +481,30 @@ Verify.prototype.readProxies = function() {
 Verify.prototype.saveProxies = function() {
     var _this = this;
     this.outputFile = String(this.outputFile).replace("{date}", this.dateStamp());
+    if (fs.existsSync(this.outputFile)) {
+        var origProxies = fs.readFileSync(this.outputFile).toString('utf8').split('\n');
+        var oldTotal = this._verifiedProxies.length;
+        this.log("Total ", "c:bold", this._verifiedProxies.length, " proxies. Appending to ",
+            "c:bold", origProxies.length, " found in ", "c:bold", this.outputFile);
+
+        this._verifiedProxies.push.apply(this._verifiedProxies, origProxies);
+
+        oldTotal = this._verifiedProxies.length;
+        // es6 way of removing dupes, taken from http://stackoverflow.com/questions/9229645/remove-duplicates-from-javascript-array
+        this._verifiedProxies =  Array.from(new Set(this._verifiedProxies));
+
+        if (oldTotal - this._verifiedProxies.length > 0) {
+            _this.log("Removing ", "c:bold", (oldTotal - this._verifiedProxies.length),
+                " duplicates. Grand Total ", "c:bold", this._verifiedProxies.length);
+        }
+    }
+
     fs.writeFileSync(this.outputFile, this._verifiedProxies.join("\n"), "utf8");
-    this.log("c:cyan", "Saved verified proxies to ", "c:cyan bold", this.outputFile);
+    this.log("c:cyan", "Saved ", "c:cyan bold", this._verifiedProxies.length, "c:cyan", " unique proxies to ",
+        "c:cyan bold", this.outputFile);
+    //fs.writeFileSync(this.outputFile, this._verifiedProxies.join("\n"), "utf8");
+    //fs.appendFileSync(this.outputFile, this._verifiedProxies.join("\n"), "utf8");
+    //this.log("c:cyan", "Saved verified proxies to ", "c:cyan bold", this.outputFile);
 
     if (this.debug) {
         var date = new Date().toISOString().substring(0,19).replace('T', ' ');
@@ -603,7 +669,7 @@ Verify.prototype.runTime = function(startTime) {
         str += chalk.bold(elapsed.mins) + 'm ' ;
     }
     if (( elapsed.secs > 0 && showMs ) || ( elapsed.secs === 0 && elapsed.ms > 0 ) ) {
-        str += chalk.bold(elapsed.secs) + '.' + chalk.bold(elapsed.ms) + 's';
+        str += chalk.bold(elapsed.secs) + '.' + chalk.bold(String(elapsed.ms).substr(0,2)) + 's';
     }
     else if (elapsed.secs > 0) {
         str += chalk.bold(elapsed.secs) + 's';
@@ -651,7 +717,8 @@ if (process.argv[1] == __filename) {
         .option("-w, --workers [workers]", "The number of workers to use")
         .option("-c, --requests [requests]", "The number of concurrent requests to make. Try to make it multiple of workers")
         .option("-t, --timeout [timeout]", "Timeout in ms before to kill the socket")
-        .option("-s, --strict", "Strict enforce timeout to weed out active but slow proxies")
+        .option("-s, --strict", "Strictly enforces timeout to weed out active but slow proxies")
+        .option("-p, --ip", "Uses iplookup.flashfxp.com to verify proxy isn't rewriting web pages")
         .option("-v, --verbose", "Show verbose output")
         .option("-d, --debug", "Debug stores speed output to debug_verify.log")
         .option("-n, --nooutput", "Disable all output")
@@ -663,8 +730,12 @@ if (process.argv[1] == __filename) {
         opts.inputFile = __dirname + '/proxies/fetched/'.replace(/\//g, path.sep);
         opts.outputFile = __dirname + '/proxies/verified_all.txt'.replace(/\//g, path.sep);
     }
-    if (program.input)
-        opts.inputFile = program.input;
+    if (program.input) {
+        if (program.input.indexOf(',') >= -1)
+            opts.inputFile = program.input.split(',');
+        else
+            opts.inputFile = program.input;
+    }
     if (program.output)
         opts.outputFile = program.output;
     if (program.url)
@@ -675,8 +746,11 @@ if (process.argv[1] == __filename) {
         opts.concurrentRequests = program.requests;
     if (program.timeout)
         opts.requestTimeout = parseInt(program.timeout);
+    //if (program.strict == 0 || program.strict == 'no' || program.strict == 'false' || program.strict == '0')
     if (program.strict)
-        opts.strictEnforceTimeout = program.strict;
+        opts.strict = true;
+    if (program.ip)
+        opts.ip = true;
     if (program.verbose)
         opts.verbose = program.verbose;
     if (program.debug)
